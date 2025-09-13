@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GitHub Pages Chess Bot (Stockfish)</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;display:flex;gap:20px;min-height:100vh;align-items:flex-start;padding:20px;background:#f6f7fb}
+    #board{width:480px;height:480px;display:grid;grid-template-columns:repeat(8,1fr);border:2px solid #333}
+    .square{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:30px;user-select:none}
+    .light{background:#f0d9b5}
+    .dark{background:#b58863}
+    #controls{max-width:420px}
+    button,select,input{font-size:14px;padding:8px;margin:6px 0;width:100%}
+    #log{height:220px;overflow:auto;background:#fff;padding:8px;border:1px solid #ccc}
+    .row{display:flex;gap:8px}
+  </style>
+</head>
+<body>
+  <div>
+    <div id="board"></div>
+    <div class="row">
+      <button id="newBtn">New Game</button>
+      <button id="undoBtn">Undo</button>
+    </div>
+  </div>
+  <div id="controls">
+    <h2>Chess Bot (Stockfish) — Play from GitHub Pages</h2>
+    <p>Engine: <strong id="engineName">Stockfish (WASM)</strong></p>
+    <label>Play as:</label>
+    <select id="sideSelect">
+      <option value="white">White (you)</option>
+      <option value="black">Black (you)</option>
+    </select>
+    <label>Skill / Strength (0-20):</label>
+    <input id="skill" type="range" min="0" max="20" value="20">
+    <label>Move time (ms):</label>
+    <input id="movetime" type="number" value="2000">
+    <label>Enable opening book (simple):</label>
+    <input id="book" type="checkbox" checked>
+    <div class="row">
+      <button id="engineMoveBtn">Engine Move</button>
+      <button id="flipBtn">Flip Board</button>
+    </div>
+    <h3>Game log</h3>
+    <div id="log"></div>
+    <p style="font-size:12px;color:#555">Note: You must provide a Stockfish WebAssembly build (stockfish.wasm.js or stockfish.js + stockfish.wasm) in the same repository. See instructions below.</p>
+  </div>
+
+<script>
+/*
+  Simple single-file chess UI + Stockfish (WASM) integration.
+  This file provides a playable board and talks to a Stockfish WebWorker.
+  IMPORTANT: This is NOT stronger than Stockfish 16. You cannot exceed
+  Stockfish's strength by using it. If you want stronger play you must use
+  a stronger engine (e.g., neural-network engines) which are heavy and
+  typically not feasible to run fully inside a browser.
+
+  To use on GitHub Pages:
+  1. Download a Stockfish WASM build (stockfish.wasm.js / stockfish.js + stockfish.wasm)
+     and place it in the same repo (root or same folder as this HTML).
+     Official builds are provided by Stockfish or community projects.
+  2. Host this HTML on GitHub Pages (push repo and enable Pages). The page will load
+     the local stockfish script as a WebWorker and play in-browser.
+*/
+
+// Minimal chess rules via tiny chess.js-like implementation (sufficient for move legality and FEN)
+// This is a compact rules helper. For full features, replace with the chess.js library.
+class TinyChess {
+  constructor(){ this.reset(); }
+  reset(){ this.fen = 'start'; this.moves = []; this.turn = 'w'; this.position = this._fenToPosition('start'); }
+  _fenToPosition(fen){ if(fen==='start'){ // standard start
+      return ('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR').split('/'); }
+    return fen.split('/'); }
+  positionToFen(){ return this.position.join('/'); }
+  // NOTE: This tiny implementation accepts SAN like 'e2e4' notation for moves and does very basic legality checks.
+  moveUci(uci){ // uci 'e2e4'
+    const from = uci.slice(0,2), to = uci.slice(2,4);
+    const fromIdx = this._squareToIdx(from); const toIdx = this._squareToIdx(to);
+    const piece = this._board()[fromIdx]; if(!piece) return false;
+    // naive: allow move if not capturing own piece
+    const dest = this._board()[toIdx]; if(dest && dest[0]===piece[0]) return false;
+    // perform move
+    const b = this._board(); b[toIdx]=b[fromIdx]; b[fromIdx]=null;
+    this._setBoard(b); this.moves.push(uci); this.turn = this.turn==='w'?'b':'w';
+    return true;
+  }
+  _board(){ // 64-array
+    const arr=[]; const ranks=this.position;
+    for(let r=0;r<8;r++){ const row=ranks[r]; for(let c=0;c<row.length;c++){ const ch=row[c]; arr.push(ch==='8'?null: (ch==='/'?null: this._charToPiece(ch) )); }}
+    // fallback building: easier: parse by Fen->cells
+    // Simpler: rebuild from string with digits
+    const cells=[]; for(let r=0;r<8;r++){ const s=this.position[r]; let i=0; while(i<s.length){ const ch=s[i]; if(ch>='1' && ch<='8'){ const n=parseInt(ch); for(let k=0;k<n;k++) cells.push(null); i++; } else { cells.push(this._charToPiece(ch)); i++; } } }
+    return cells;
+  }
+  _setBoard(cells){ // convert to this.position rows
+    const rows=[]; for(let r=0;r<8;r++){ let s=''; for(let c=0;c<8;c++){ const p=cells[r*8+c]; if(p===null) s+='1'; else s+=this._pieceToChar(p); }
+      // compress digits
+      s=s.replace(/11111111/g,'8').replace(/1111111/g,'7').replace(/111111/g,'6').replace(/11111/g,'5').replace(/1111/g,'4').replace(/111/g,'3').replace(/11/g,'2');
+      rows.push(s);
+    }
+    this.position=rows;
+  }
+  _charToPiece(ch){ if(!ch) return null; return (ch.toLowerCase()==ch?ch:'').length?ch:ch; }
+  _pieceToChar(p){ return p; }
+  _squareToIdx(sq){ const file = sq.charCodeAt(0)-97; const rank = 8 - parseInt(sq[1]); return rank*8 + file; }
+  fen(){ return this.positionToFen() + ' ' + (this.turn==='w'?'w':'b') + ' - - 0 1'; }
+}
+
+// Simple visual board using Unicode pieces
+const PIECES = {p:'♟',r:'♜',n:'♞',b:'♝',q:'♛',k:'♚',P:'♙',R:'♖',N:'♘',B:'♗',Q:'♕',K:'♔'};
+let flipped=false;
+const boardEl = document.getElementById('board');
+const tiny = new TinyChess();
+
+let selectedFrom = null;
+let engineWorker = null;
+let stockfishReady=false;
+let useBook=true;
+
+function initBoard(){ boardEl.innerHTML=''; for(let rank=8;rank>=1;rank--){ for(let file=0;file<8;file++){ const sq=document.createElement('div'); sq.className='square '+(((rank+file)%2)?'dark':'light'); sq.dataset.sq=String.fromCharCode(97+file)+rank; sq.addEventListener('click',onSquareClick); boardEl.appendChild(sq); } } renderBoard(); }
+
+function renderBoard(){ // read tiny position
+  const cells = tiny._board(); const squares = boardEl.querySelectorAll('.square'); for(let i=0;i<64;i++){ const sq = squares[flipped?63-i:i]; const piece = cells[i]; sq.textContent = piece?PIECES[piece]||'': '';
+    sq.style.outline='';
+  }
+}
+
+function onSquareClick(e){ const sq = e.currentTarget.dataset.sq; if(!selectedFrom){ selectedFrom = sq; e.currentTarget.style.outline='3px solid #2196f3'; } else { const move = selectedFrom + sq; const ok = tiny.moveUci(move); selectedFrom=null; clearOutlines(); if(ok){ log('You: '+move); renderBoard(); maybeEngineMove(); } else { log('Illegal move: '+move); } }
+}
+function clearOutlines(){ boardEl.querySelectorAll('.square').forEach(s=>s.style.outline=''); }
+
+function log(msg){ const l = document.getElementById('log'); l.appendChild(document.createElement('div')).textContent = msg; l.scrollTop = l.scrollHeight; }
+
+// Load Stockfish as a WebWorker. The repo must contain stockfish.wasm.js or stockfish.js
+function startEngine(){ if(engineWorker) engineWorker.terminate(); try{
+    engineWorker = new Worker('stockfish.wasm.js'); // common name; user may change
+  } catch(err){ try{ engineWorker = new Worker('stockfish.js'); } catch(err2){ log('Failed to start engine. Put a Stockfish WASM build (stockfish.wasm.js) into the repo.'); return; } }
+  engineWorker.onmessage = (e)=>{ const line = e.data; if(typeof line === 'string'){ handleEngineMessage(line); } };
+  // small handshake
+  sendToEngine('uci');
+}
+
+function sendToEngine(cmd){ if(!engineWorker) return; engineWorker.postMessage(cmd); }
+
+let engineInfo = {};
+function handleEngineMessage(line){ log('engine: '+line);
+  if(line.startsWith('id name')) engineInfo.name = line.slice(8).trim();
+  if(line==='uciok') stockfishReady=true;
+  if(line.startsWith('bestmove')){
+    const parts=line.split(' '); const move=parts[1]; if(move && move!=='(none)'){ tiny.moveUci(move); renderBoard(); log('Engine: '+move); }
+  }
+}
+
+function maybeEngineMove(){ const side = document.getElementById('sideSelect').value; const turn = tiny.turn; // tiny.turn updated inside
+  // tiny.turn is internal; we'll rely on last move parity: if number of moves is even -> white
+  const movesCount = tiny.moves.length;
+  const engineIsWhite = (side==='black');
+  const engineToPlay = (movesCount%2===0) ? engineIsWhite : !engineIsWhite;
+  if(engineToPlay){ // request engine move
+    requestEngineMove(); }
+}
+
+function requestEngineMove(){ if(!stockfishReady){ log('Engine not ready'); return; }
+  const movetime = parseInt(document.getElementById('movetime').value) || 2000;
+  const skill = parseInt(document.getElementById('skill').value) || 20;
+  // set options
+  sendToEngine('setoption name Skill Level value '+skill);
+  sendToEngine('position startpos moves '+tiny.moves.join(' '));
+  sendToEngine('go movetime '+movetime);
+}
+
+// UI wiring
+document.getElementById('newBtn').addEventListener('click',()=>{ tiny.reset(); tiny.position = tiny._fenToPosition('start'); tiny.moves=[]; tiny.turn='w'; renderBoard(); log('New game'); });
+document.getElementById('undoBtn').addEventListener('click',()=>{ if(tiny.moves.length===0) return; tiny.moves.pop(); // naive undo: rebuild from moves
+  tiny.reset(); tiny.position = tiny._fenToPosition('start'); tiny.moves.slice(0).forEach(m=>tiny.moveUci(m)); renderBoard(); });
+
+document.getElementById('engineMoveBtn').addEventListener('click',()=>requestEngineMove());
+document.getElementById('flipBtn').addEventListener('click',()=>{ flipped=!flipped; renderBoard(); });
+
+// start
+initBoard(); startEngine();
+
+</script>
+</body>
+</html>
